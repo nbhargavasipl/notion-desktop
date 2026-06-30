@@ -137,13 +137,9 @@ fn get_capture_device(
 ) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
+    // On all platforms: try system audio first, fall back to microphone
     match try_system_capture(host) {
         Ok(pair) => Ok(pair),
-
-        // macOS: bubble the error so the frontend can prompt BlackHole install
-        Err(ref e) if e == "no_virtual_audio_device" => Err(e.clone()),
-
-        // Everywhere else: silently fall back to the default microphone
         Err(_) => {
             let d = host
                 .default_input_device()

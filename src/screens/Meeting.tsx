@@ -253,10 +253,10 @@ export default function Meeting() {
 
   const reset = () => { setStatus("idle"); setResult(null); setError(null); setElapsed(0); chunks.current = []; };
 
-  // Determine if recording is possible
-  const needsMacSetup  = IS_TAURI && setup?.os === "macos"  && !setup.system_audio;
+  // Setup warnings — shown as banners but never block recording
+  const needsMacSetup   = IS_TAURI && setup?.os === "macos" && !setup.system_audio;
   const needsLinuxSetup = IS_TAURI && setup?.os === "linux" && !setup.system_audio;
-  const canRecord       = !needsMacSetup;
+  const canRecord       = true; // mic fallback always available
 
   return (
     <div style={{ padding: 32, maxWidth: 900, margin: "0 auto" }}>
@@ -290,14 +290,14 @@ export default function Meeting() {
 
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: "#fff", marginBottom: 2 }}>
-            {status === "idle"       && (needsMacSetup ? "Setup required" : "Ready to record")}
+            {status === "idle"       && "Ready to record"}
             {status === "recording"  && `Recording — ${fmt(elapsed)}`}
             {status === "processing" && "Uploading & transcribing…"}
             {status === "done"       && "Transcription complete"}
             {status === "error"      && "Something went wrong"}
           </div>
           <div style={{ fontSize: 13, color: "#666" }}>
-            {status === "idle"       && (needsMacSetup ? "Follow the setup steps above, then restart the app" : "Press Start when your meeting begins")}
+            {status === "idle"       && (needsMacSetup ? "Recording mic only — install BlackHole above for full meeting audio" : "Press Start when your meeting begins")}
             {status === "recording"  && "Press Stop when the meeting ends"}
             {status === "processing" && "This usually takes 10–30 seconds"}
             {status === "done"       && `Recorded ${fmt(elapsed)} of audio`}

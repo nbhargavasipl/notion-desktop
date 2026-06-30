@@ -1,9 +1,10 @@
 import { useState } from "react";
 import Transcribe from "./screens/Transcribe";
+import Meeting from "./screens/Meeting";
 import History from "./screens/History";
 import Settings from "./screens/Settings";
 
-type Screen = "transcribe" | "history" | "settings";
+type Screen = "transcribe" | "meeting" | "history" | "settings";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("transcribe");
@@ -20,6 +21,7 @@ export default function App() {
         </div>
         {([
           { id: "transcribe", label: "Transcribe" },
+          { id: "meeting",    label: "Meeting" },
           { id: "history",    label: "History" },
           { id: "settings",   label: "Settings" },
         ] as { id: Screen; label: string }[]).map(({ id, label }) => (
@@ -41,6 +43,7 @@ export default function App() {
       {/* Main content */}
       <main style={{ flex: 1, overflow: "auto" }}>
         {screen === "transcribe" && <Transcribe />}
+        {screen === "meeting"    && <Meeting />}
         {screen === "history"    && <History />}
         {screen === "settings"   && <Settings />}
       </main>

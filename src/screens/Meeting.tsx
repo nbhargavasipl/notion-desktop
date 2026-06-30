@@ -1,15 +1,17 @@
 import { useState, useRef, useEffect } from "react";
 
 interface TranscriptResult {
-  input_language:       string;
-  original_transcript:  string;
+  input_language:        string;
+  original_transcript:   string;
   translated_transcript: string;
-  confidence:           number | null;
-  low_confidence:       boolean;
+  confidence:            number | null;
+  low_confidence:        boolean;
 }
 
-type RecordMode = "system" | "mic";
-type Status     = "idle" | "recording" | "processing" | "done" | "error";
+type Status = "idle" | "recording" | "processing" | "done" | "error";
+
+// True when running inside the Tauri desktop shell
+const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function loadConfig() {
   return {
@@ -25,17 +27,25 @@ function fmt(secs: number) {
   return `${m}:${s}`;
 }
 
-export default function Meeting() {
-  const [status,   setStatus]   = useState<Status>("idle");
-  const [mode,     setMode]     = useState<RecordMode>("system");
-  const [elapsed,  setElapsed]  = useState(0);
-  const [result,   setResult]   = useState<TranscriptResult | null>(null);
-  const [error,    setError]    = useState<string | null>(null);
+function base64ToBlob(b64: string, mimeType: string): Blob {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
 
+export default function Meeting() {
+  const [status,  setStatus]  = useState<Status>("idle");
+  const [elapsed, setElapsed] = useState(0);
+  const [result,  setResult]  = useState<TranscriptResult | null>(null);
+  const [error,   setError]   = useState<string | null>(null);
+
+  // Browser-mode MediaRecorder refs (unused in Tauri mode)
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const chunks        = useRef<Blob[]>([]);
-  const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef     = useRef<MediaStream | null>(null);
+
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => () => stopTimer(), []);
 
@@ -43,69 +53,66 @@ export default function Meeting() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
   };
 
-  const startRecording = async () => {
-    setError(null);
-    setResult(null);
-    chunks.current = [];
+  const startTimer = () => {
+    setElapsed(0);
+    timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
+  };
 
+  // ── Tauri native path ──────────────────────────────────────────────────────
+  const startTauri = async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("start_recording");
+    setStatus("recording");
+    startTimer();
+  };
+
+  const stopTauri = async () => {
+    stopTimer();
+    setStatus("processing");
     try {
-      let stream: MediaStream;
-
-      if (mode === "system") {
-        // Capture system audio (Teams call audio + all sounds)
-        const display = await navigator.mediaDevices.getDisplayMedia({
-          video: true,   // required by the API — we discard it immediately
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-          },
-        });
-        // Drop video tracks — we only want audio
-        display.getVideoTracks().forEach(t => t.stop());
-        stream = new MediaStream(display.getAudioTracks());
-
-        if (stream.getAudioTracks().length === 0) {
-          setError("No audio captured. Make sure you ticked 'Share system audio' in the dialog.");
-          return;
-        }
-      } else {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      }
-
-      streamRef.current = stream;
-
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : "audio/webm";
-
-      const recorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorder.current = recorder;
-
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.current.push(e.data); };
-      recorder.onstop = uploadRecording;
-      recorder.start(1000);
-
-      setStatus("recording");
-      setElapsed(0);
-      timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
+      const { invoke } = await import("@tauri-apps/api/core");
+      const wavB64: string = await invoke("stop_recording");
+      const blob = base64ToBlob(wavB64, "audio/wav");
+      const file = new File([blob], `meeting-${Date.now()}.wav`, { type: "audio/wav" });
+      await uploadFile(file);
     } catch (e: unknown) {
-      const msg = (e as Error).message || "";
-      if (msg.includes("Permission denied") || msg.includes("NotAllowed")) {
-        setError("Permission denied. Please allow microphone / screen audio access and try again.");
-      } else {
-        setError(msg || "Failed to start recording.");
-      }
+      setError((e as Error).message || "Recording failed");
+      setStatus("error");
     }
   };
 
-  const stopRecording = () => {
+  // ── Browser fallback path (mic only, no system audio) ─────────────────────
+  const startBrowser = async () => {
+    chunks.current = [];
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streamRef.current = stream;
+
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : "audio/webm";
+
+    const recorder = new MediaRecorder(stream, { mimeType });
+    mediaRecorder.current = recorder;
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.current.push(e.data); };
+    recorder.onstop = async () => {
+      const blob = new Blob(chunks.current, { type: "audio/webm" });
+      const file = new File([blob], `meeting-${Date.now()}.webm`, { type: "audio/webm" });
+      await uploadFile(file);
+    };
+    recorder.start(1000);
+    setStatus("recording");
+    startTimer();
+  };
+
+  const stopBrowser = () => {
     stopTimer();
     mediaRecorder.current?.stop();
     streamRef.current?.getTracks().forEach(t => t.stop());
     setStatus("processing");
   };
 
-  const uploadRecording = async () => {
+  // ── Shared upload ─────────────────────────────────────────────────────────
+  const uploadFile = async (file: File) => {
     const { apiUrl, apiKey, targetLanguage } = loadConfig();
     if (!apiUrl || !apiKey) {
       setError("API URL and key not set — go to Settings first.");
@@ -114,18 +121,10 @@ export default function Meeting() {
     }
 
     try {
-      const blob = new Blob(chunks.current, { type: "audio/webm" });
-      const file = new File([blob], `meeting-${Date.now()}.webm`, { type: "audio/webm" });
-
       const form = new FormData();
       form.append("file", file);
-
       const url = `${apiUrl.replace(/\/$/, "")}/?target_language=${targetLanguage}`;
-      const res  = await fetch(url, {
-        method:  "POST",
-        headers: { "X-API-Key": apiKey },
-        body:    form,
-      });
+      const res  = await fetch(url, { method: "POST", headers: { "X-API-Key": apiKey }, body: form });
       const data = await res.json();
 
       if (!data.success) {
@@ -134,7 +133,6 @@ export default function Meeting() {
       } else {
         setResult(data);
         setStatus("done");
-        // Save to history
         const history = JSON.parse(localStorage.getItem("history") || "[]");
         history.unshift({ ...data, filename: `Meeting (${fmt(elapsed)})`, timestamp: Date.now() });
         localStorage.setItem("history", JSON.stringify(history.slice(0, 50)));
@@ -142,6 +140,32 @@ export default function Meeting() {
     } catch (e: unknown) {
       setError((e as Error).message || "Upload failed");
       setStatus("error");
+    }
+  };
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const startRecording = async () => {
+    setError(null);
+    setResult(null);
+    try {
+      if (IS_TAURI) {
+        await startTauri();
+      } else {
+        await startBrowser();
+      }
+    } catch (e: unknown) {
+      const msg = (e as Error).message || "";
+      setError(msg.includes("Permission denied") || msg.includes("NotAllowed")
+        ? "Microphone access denied. Allow it in System Preferences and try again."
+        : msg || "Failed to start recording.");
+    }
+  };
+
+  const stopRecording = async () => {
+    if (IS_TAURI) {
+      await stopTauri();
+    } else {
+      stopBrowser();
     }
   };
 
@@ -158,31 +182,10 @@ export default function Meeting() {
       <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 6 }}>Meeting Capture</h2>
       <p style={{ color: "#666", fontSize: 14, marginBottom: 28 }}>
         Record any meeting (Teams, Zoom, Google Meet) and get a full transcript + English translation.
+        {IS_TAURI
+          ? " Recording uses your microphone directly — no browser popup."
+          : " Make sure your microphone can hear the meeting audio."}
       </p>
-
-      {/* Mode selector */}
-      {status === "idle" && (
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 13, color: "#888", marginBottom: 8 }}>Capture source</div>
-          <div style={{ display: "flex", gap: 10 }}>
-            {(["system", "mic"] as RecordMode[]).map(m => (
-              <button key={m} onClick={() => setMode(m)} style={{
-                padding: "8px 18px", borderRadius: 8, fontSize: 13, cursor: "pointer",
-                border: `1px solid ${mode === m ? "#4ade80" : "#333"}`,
-                background: mode === m ? "#0d2b12" : "#1a1a1a",
-                color: mode === m ? "#4ade80" : "#888",
-              }}>
-                {m === "system" ? "🖥  System audio" : "🎙  Microphone"}
-              </button>
-            ))}
-          </div>
-          <p style={{ fontSize: 12, color: "#555", marginTop: 8 }}>
-            {mode === "system"
-              ? "Captures all audio on your computer — including Teams call audio. A screen-share dialog will appear; tick 'Share system audio' before clicking Share."
-              : "Captures your microphone only. Use this if you want to record just your own voice."}
-          </p>
-        </div>
-      )}
 
       {/* Recording status card */}
       <div style={{
@@ -190,10 +193,12 @@ export default function Meeting() {
         border: `1px solid ${status === "recording" ? "#ef4444" : "#2a2a2a"}`,
         display: "flex", alignItems: "center", gap: 20,
       }}>
-        {/* Indicator */}
         <div style={{
           width: 14, height: 14, borderRadius: "50%", flexShrink: 0,
-          background: status === "recording" ? "#ef4444" : status === "processing" ? "#f59e0b" : status === "done" ? "#4ade80" : "#333",
+          background: status === "recording" ? "#ef4444"
+            : status === "processing" ? "#f59e0b"
+            : status === "done"        ? "#4ade80"
+            : "#333",
           boxShadow: status === "recording" ? "0 0 0 4px rgba(239,68,68,0.2)" : "none",
           animation: status === "recording" ? "pulse 1.5s infinite" : "none",
         }} />
@@ -215,7 +220,6 @@ export default function Meeting() {
           </div>
         </div>
 
-        {/* Action button */}
         {status === "idle" && (
           <button onClick={startRecording} style={{
             background: "#ef4444", color: "#fff", border: "none",
@@ -251,7 +255,8 @@ export default function Meeting() {
           <div style={{ background: "#1a1a1a", borderRadius: 10, padding: 20 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
               <span style={{ fontSize: 13, color: "#888" }}>Original · {result.input_language}</span>
-              <button onClick={() => navigator.clipboard.writeText(result.original_transcript)}
+              <button
+                onClick={() => navigator.clipboard.writeText(result!.original_transcript)}
                 style={{ background: "transparent", border: "none", color: "#555", cursor: "pointer", fontSize: 12 }}>
                 Copy
               </button>
@@ -264,7 +269,8 @@ export default function Meeting() {
           <div style={{ background: "#1a1a1a", borderRadius: 10, padding: 20 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
               <span style={{ fontSize: 13, color: "#888" }}>Translation · EN</span>
-              <button onClick={() => navigator.clipboard.writeText(result.translated_transcript)}
+              <button
+                onClick={() => navigator.clipboard.writeText(result!.translated_transcript)}
                 style={{ background: "transparent", border: "none", color: "#555", cursor: "pointer", fontSize: 12 }}>
                 Copy
               </button>
